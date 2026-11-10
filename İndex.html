@@ -1,0 +1,537 @@
+
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR Görüntülü Konuşma</title>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+<style>
+*{box-sizing:border-box}
+
+body{
+ margin:0;
+ background:#0b1020;
+ color:white;
+ font-family:Arial,sans-serif;
+ padding:15px;
+}
+
+.container{
+ max-width:850px;
+ margin:25px auto;
+ padding:22px;
+ background:#18243a;
+ border-radius:18px;
+ text-align:center;
+}
+
+h1{font-size:25px}
+
+.status{
+ background:#263753;
+ padding:14px;
+ border-radius:10px;
+ margin:20px 0;
+ color:#75bdff;
+ overflow-wrap:anywhere;
+}
+
+.grid{
+ display:grid;
+ grid-template-columns:1fr 1fr;
+ gap:12px;
+}
+
+.video-box{
+ background:#26344b;
+ padding:10px;
+ border-radius:12px;
+ min-width:0;
+}
+
+video{
+ width:100%;
+ aspect-ratio:16/9;
+ background:black;
+ border-radius:10px;
+ object-fit:contain;
+}
+
+button{
+ border:0;
+ padding:14px 18px;
+ margin:6px;
+ border-radius:10px;
+ background:#287cff;
+ color:white;
+ font-weight:bold;
+ cursor:pointer;
+}
+
+button:disabled{opacity:.5}
+
+.red{background:#dc414b}
+.gray{background:#465875}
+
+#qr{
+ display:inline-block;
+ padding:12px;
+ background:white;
+ border-radius:10px;
+ margin:15px;
+}
+
+.hidden{display:none}
+
+@media(max-width:550px){
+ .grid{grid-template-columns:1fr}
+ .container{padding:14px}
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>📹 QR Görüntülü Konuşma</h1>
+<p>Telefon ve bilgisayar arasında canlı bağlantı</p>
+
+<div class="status" id="status">
+Bağlantı hazırlanıyor...
+</div>
+
+<div id="pcScreen" class="hidden">
+
+<h2>💻 Bilgisayar</h2>
+<p>Telefonunla QR kodu okut.</p>
+
+<div id="qr"></div>
+
+</div>
+
+<div id="phoneScreen" class="hidden">
+
+<h2>📱 Telefon</h2>
+<p>Bilgisayara bağlanıyorsun.</p>
+
+</div>
+
+<div class="grid">
+
+ <div class="video-box">
+  <h3>Benim Kameram</h3>
+  <video id="localVideo" autoplay playsinline muted></video>
+ </div>
+
+ <div class="video-box">
+  <h3>Karşı Taraf</h3>
+  <video id="remoteVideo" autoplay playsinline></video>
+ </div>
+
+</div>
+
+<div style="margin-top:20px">
+
+<button id="startBtn" onclick="startCamera()" disabled>
+📷 Görüşmeyi Başlat
+</button>
+
+<button class="gray" onclick="switchCamera()">
+🔄 Kamera Değiştir
+</button>
+
+<button class="gray" onclick="toggleSound()">
+🔊 Sesi Aç / Kapat
+</button>
+
+<button class="red" onclick="disconnect()">
+❌ Görüşmeyi Bitir
+</button>
+
+</div>
+
+</div>
+
+<script>
+
+// =================================
+// AYARLAR
+// =================================
+
+const params = new URLSearchParams(location.search);
+const hostId = params.get("host");
+const isPhone = !!hostId;
+
+let peer;
+let localStream;
+let remotePeerId = null;
+let dataConnection = null;
+
+let pendingCall = null;
+let callsStarted = false;
+let currentFacing = isPhone ? "environment" : "user";
+let soundMuted = false;
+let stopped = false;
+
+// =================================
+// ARAYÜZ
+// =================================
+
+const statusEl = document.getElementById("status");
+const localVideo = document.getElementById("localVideo");
+const remoteVideo = document.getElementById("remoteVideo");
+
+function status(text){
+ statusEl.textContent = text;
+}
+
+// =================================
+// PEERJS BAŞLAT
+// =================================
+
+function initialize(){
+
+ if(isPhone){
+  document.getElementById("phoneScreen")
+   .classList.remove("hidden");
+
+  remotePeerId = hostId;
+
+ }else{
+  document.getElementById("pcScreen")
+   .classList.remove("hidden");
+ }
+
+ peer = new Peer();
+
+ peer.on("open", id => {
+
+  document.getElementById("startBtn").disabled = false;
+
+  if(!isPhone){
+
+   const phoneURL =
+    location.origin +
+    location.pathname +
+    "?host=" + encodeURIComponent(id);
+
+   new QRCode(document.getElementById("qr"),{
+    text:phoneURL,
+    width:220,
+    height:220
+   });
+
+   status("QR hazır. Telefonun okutmasını bekliyorum.");
+
+  }else{
+
+   connectToPC();
+
+  }
+
+ });
+
+ peer.on("connection", connection => {
+
+  dataConnection = connection;
+
+  connection.on("data", data => {
+
+   if(data.type === "hello" && !isPhone){
+
+    remotePeerId = data.id;
+
+    status("Telefon eşleşti. Kameranı açabilirsin.");
+
+    maybeCall();
+
+   }
+
+  });
+
+ });
+
+ peer.on("call", call => {
+
+  if(!localStream){
+
+   pendingCall = call;
+   return;
+
+  }
+
+  answerCall(call);
+
+ });
+
+ peer.on("error", error => {
+
+  status("Bağlantı hatası: " + error.type);
+
+ });
+
+ peer.on("disconnected", () => {
+
+  status("Sunucu bağlantısı kesildi.");
+
+ });
+
+}
+
+// =================================
+// TELEFON PC'YE BAĞLANIR
+// =================================
+
+function connectToPC(){
+
+ dataConnection = peer.connect(hostId);
+
+ dataConnection.on("open", () => {
+
+  dataConnection.send({
+   type:"hello",
+   id:peer.id
+  });
+
+  status("PC bulundu. Kameranı açabilirsin.");
+
+ });
+
+ dataConnection.on("error", error => {
+  status("Bağlantı kurulamadı: " + error);
+ });
+
+}
+
+// =================================
+// KAMERA VE MİKROFON
+// =================================
+
+async function startCamera(){
+
+ try{
+
+  localStream = await navigator.mediaDevices.getUserMedia({
+
+   video:{
+    facingMode:{ideal:currentFacing},
+    width:{ideal:1280},
+    height:{ideal:720}
+   },
+
+   audio:{
+    echoCancellation:true,
+    noiseSuppression:true
+   }
+
+  });
+
+  localVideo.srcObject = localStream;
+
+  document.getElementById("startBtn").disabled = true;
+
+  status("Kamera ve mikrofon açıldı.");
+
+  if(pendingCall){
+
+   answerCall(pendingCall);
+   pendingCall = null;
+
+  }
+
+  maybeCall();
+
+ }catch(error){
+
+  status("Kamera izni alınamadı: " + error.message);
+
+ }
+
+}
+
+// =================================
+// ÇİFT YÖNLÜ GÖRÜŞME
+// =================================
+
+function maybeCall(){
+
+ if(!localStream || !remotePeerId || callsStarted || stopped){
+  return;
+ }
+
+ callsStarted = true;
+
+ status("Görüntülü görüşme başlatılıyor...");
+
+ const call = peer.call(remotePeerId,localStream);
+
+ if(!call){
+  callsStarted = false;
+  status("Arama başlatılamadı.");
+  return;
+ }
+
+ handleCall(call);
+
+}
+
+function answerCall(call){
+
+ call.answer(localStream);
+
+ handleCall(call);
+
+}
+
+function handleCall(call){
+
+ call.on("stream", stream => {
+
+  remoteVideo.srcObject = stream;
+
+  remoteVideo.play().catch(()=>{});
+
+  status("🟢 Görüntülü görüşme aktif!");
+
+ });
+
+ call.on("close", () => {
+
+  remoteVideo.srcObject = null;
+
+  status("Karşı taraf görüşmeyi bitirdi.");
+
+ });
+
+ call.on("error", error => {
+
+  status("Görüşme hatası: " + error);
+
+ });
+
+}
+
+// =================================
+// KAMERA DEĞİŞTİR
+// =================================
+
+async function switchCamera(){
+
+ if(!localStream){
+  status("Önce kamerayı aç.");
+  return;
+ }
+
+ const next =
+  currentFacing === "user" ? "environment" : "user";
+
+ try{
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+
+   video:{
+    facingMode:{ideal:next}
+   },
+
+   audio:false
+
+  });
+
+  const newTrack = stream.getVideoTracks()[0];
+
+  const oldTrack = localStream.getVideoTracks()[0];
+
+  const activeCalls = peer.connections[remotePeerId] || [];
+
+  for(const call of activeCalls){
+
+   const sender = call.peerConnection
+    ?.getSenders()
+    .find(s => s.track?.kind === "video");
+
+   if(sender){
+    await sender.replaceTrack(newTrack);
+   }
+
+  }
+
+  localStream.removeTrack(oldTrack);
+  localStream.addTrack(newTrack);
+
+  oldTrack.stop();
+
+  currentFacing = next;
+
+  localVideo.srcObject = localStream;
+
+  status("Kamera değiştirildi.");
+
+ }catch(error){
+
+  status("Kamera değiştirilemedi: " + error.message);
+
+ }
+
+}
+
+// =================================
+// SES KONTROLÜ
+// =================================
+
+function toggleSound(){
+
+ soundMuted = !soundMuted;
+
+ remoteVideo.muted = soundMuted;
+
+ remoteVideo.play().catch(()=>{});
+
+ status(soundMuted ? "Ses kapatıldı." : "Ses açıldı.");
+
+}
+
+// =================================
+// GÖRÜŞMEYİ BİTİR
+// =================================
+
+function disconnect(){
+
+ stopped = true;
+
+ if(localStream){
+
+  localStream.getTracks().forEach(track=>track.stop());
+
+ }
+
+ if(peer){
+
+  peer.destroy();
+
+ }
+
+ localVideo.srcObject = null;
+ remoteVideo.srcObject = null;
+
+ status("Görüşme sonlandırıldı.");
+
+ document.getElementById("startBtn").disabled = true;
+
+}
+
+// =================================
+// BAŞLAT
+// =================================
+
+initialize();
+
+</script>
+
+</body>
+</html>
+
